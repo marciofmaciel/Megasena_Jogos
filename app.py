@@ -285,12 +285,13 @@ def backtest(dezenas_df, pesos, num_sim, jogos_por_concurso, inicio, fim, filtro
 # Abas
 # ================================================================
 
-tab_modelo, tab_dezenas, tab_caos, tab_jogos, tab_pacotes, tab_oportunidade, tab_backtest = st.tabs([
+tab_modelo, tab_dezenas, tab_caos, tab_jogos, tab_pacotes, tab_lotofacil, tab_oportunidade, tab_backtest = st.tabs([
     "Modelo & Pesos",
     "Análise de Dezenas",
     "🌀 Teoria do Caos",
     "Jogos Otimizados",
     "Pacotes de Perfis",
+    "LOTOFACIL",
     "🎯 Jogos por Oportunidade",
     "Backtest & Métricas"
 ])
@@ -508,6 +509,124 @@ with tab_pacotes:
                 st.dataframe(dfp, use_container_width=True)
             else:
                 st.warning(f"Nenhum jogo encontrado para o perfil {nome}.")
+
+# ----------------------------------------------------------------
+# Aba: LOTOFACIL
+# ----------------------------------------------------------------
+with tab_lotofacil:
+    st.subheader("🎯 LOTOFACIL — Elaboração de Jogos (15 números: 01–25)")
+    st.markdown(
+        "Carregue um arquivo Excel/CSV com o histórico da Lotofácil (cada linha deve conter as 15 dezenas do concurso). "
+        "A aba irá gerar 3 jogos otimizados com base nas frequências detectadas no arquivo carregado."
+    )
+
+    uploaded_lf = st.file_uploader("📂 Carregar arquivo Lotofácil (Excel/CSV)", type=["xlsx", "xls", "csv"], key="lf_uploader")
+    if uploaded_lf:
+        try:
+            if str(uploaded_lf.name).lower().endswith(".csv"):
+                df_lf_raw = pd.read_csv(uploaded_lf, header=None)
+            else:
+                df_lf_raw = pd.read_excel(uploaded_lf, header=None)
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo Lotofácil: {e}")
+            df_lf_raw = None
+
+        if df_lf_raw is not None:
+            draws = []
+            for _, row in df_lf_raw.iterrows():
+                nums = []
+                for x in row.dropna().values:
+                    try:
+                        xi = int(float(x))
+                    except Exception:
+                        continue
+                    if 1 <= xi <= 25:
+                        nums.append(xi)
+                uniq = list(dict.fromkeys(nums))
+                if len(uniq) >= 15:
+                    draws.append(sorted(uniq[:15]))
+
+            if not draws:
+                st.warning("Nenhuma linha com 15 números válidos encontrada no arquivo. Verifique o formato.")
+            else:
+                lotofacil_df = pd.DataFrame(draws, columns=[f"D{i+1:02d}" for i in range(15)])
+                st.markdown("#### Visualização das primeiras linhas do histórico detectado")
+                st.dataframe(lotofacil_df.head(10), use_container_width=True)
+
+                vals = lotofacil_df.values.flatten()
+                freq = {n: int((vals == n).sum()) for n in range(1, 26)}
+                prob_arr = np.array([freq[n] for n in range(1, 26)], dtype=float)
+                if prob_arr.sum() > 0:
+                    prob_arr = prob_arr / prob_arr.sum()
+                else:
+                    prob_arr = np.ones(25) / 25
+
+                st.markdown("#### Parâmetros de geração")
+                num_sim_lf = st.slider("Simulações Monte Carlo (Lotofácil)", 1000, 50000, 10000, step=1000)
+                evitar_rep_lf = st.checkbox("Evitar repetir números entre os 3 jogos", True)
+
+                if st.button("Gerar 3 jogos Lotofácil"):
+                    resultados = {}
+                    universe = np.arange(1, 26)
+                    for _ in range(num_sim_lf):
+                        sorteio = np.random.choice(universe, size=15, replace=False, p=prob_arr)
+                        sorteio = tuple(sorted(int(x) for x in sorteio))
+                        resultados[sorteio] = resultados.get(sorteio, 0) + 1
+
+                    ordenado = sorted(resultados.items(), key=lambda x: x[1], reverse=True)
+                    jogos_lf = []
+                    usadas = set()
+                    for comb, _ in ordenado:
+                        if len(jogos_lf) >= 3:
+                            break
+                        if evitar_rep_lf and any(n in usadas for n in comb):
+                            continue
+                        jogos_lf.append(comb)
+                        usadas.update(comb)
+
+                    if len(jogos_lf) < 3:
+                        for comb, _ in ordenado:
+                            if len(jogos_lf) >= 3:
+                                break
+                            if comb not in jogos_lf:
+                                jogos_lf.append(comb)
+
+                    if not jogos_lf:
+                        st.warning("Nenhum jogo gerado. Verifique o arquivo ou aumente o número de simulações.")
+                    else:
+                        jogos_lf_df = pd.DataFrame(jogos_lf, columns=[f"D{i+1:02d}" for i in range(15)])
+                        jogos_lf_df.index = [f"Jogo {i+1}" for i in range(len(jogos_lf_df))]
+                        jogos_lf_df["Soma"] = jogos_lf_df.sum(axis=1)
+                        jogos_lf_df["Freq Média"] = [
+                            round(np.mean([freq[n] for n in jogo]), 4) for jogo in jogos_lf
+                        ]
+                        st.markdown("#### 3 Jogos Gerados")
+                        st.dataframe(jogos_lf_df, use_container_width=True)
+
+                        fig_lf, ax_lf = plt.subplots(figsize=(10, 3))
+                        cores = ["#2ecc71", "#3498db", "#e67e22"]
+                        for idx, jogo in enumerate(jogos_lf):
+                            ax_lf.scatter(list(jogo), [idx + 1] * 15, color=cores[idx % len(cores)], s=80)
+                        ax_lf.set_xlim(0, 26)
+                        ax_lf.set_ylim(0.5, 3.5)
+                        ax_lf.set_yticks([1, 2, 3])
+                        ax_lf.set_yticklabels(["Jogo 1", "Jogo 2", "Jogo 3"])
+                        ax_lf.set_xlabel("Número")
+                        ax_lf.set_title("Distribuição dos 3 Jogos Lotofácil")
+                        ax_lf.grid(axis="x", linestyle="--", alpha=0.4)
+                        st.pyplot(fig_lf)
+
+                        from io import BytesIO
+                        output_lf = BytesIO()
+                        writer_lf = pd.ExcelWriter(output_lf, engine="xlsxwriter")
+                        jogos_lf_df.to_excel(writer_lf, sheet_name="Lotofacil_Jogos")
+                        writer_lf.close()
+                        st.download_button(
+                            label="📥 Baixar jogos Lotofácil em Excel",
+                            data=output_lf.getvalue(),
+                            file_name="jogos_lotofacil.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
 
 # ----------------------------------------------------------------
 # Aba: 🎯 Jogos por Oportunidade
