@@ -3,16 +3,33 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from cobertura import gerar_jogos_cobertura, historico_de_jogos, metricas_cobertura
 
-st.set_page_config(page_title="Mega-Sena Painel 3.0", layout="wide")
-st.title("🎯 Painel Inteligente de Previsão da Mega-Sena – Versão 3.0")
+st.set_page_config(page_title="Mega-Sena Cobertura", layout="wide")
+st.title("🎯 Mega-Sena — Gerador de Cobertura")
+st.info("Sorteios são aleatórios: análises históricas não preveem resultados. A geração maximiza cobertura em uma amostra de candidatos, sem garantia de prêmio ou de ótimo global.")
 
 uploaded_file = st.file_uploader("📂 Carregar arquivo Excel", type=["xlsx"])
 if not uploaded_file:
     st.stop()
 
 df = pd.read_excel(uploaded_file, header=0)
-dezenas_df = df.iloc[1:, 2:8].reset_index(drop=True)
+if df.shape[1] < 8 or df.empty:
+    st.error("O arquivo precisa conter concursos e seis colunas de dezenas nas posições 3 a 8.")
+    st.stop()
+if "Concurso" in df.columns:
+    concursos = pd.to_numeric(df["Concurso"], errors="coerce")
+    if concursos.isna().any() or concursos.duplicated().any():
+        st.error("A coluna Concurso deve conter identificadores numéricos únicos.")
+        st.stop()
+    df = df.assign(_ordem_concurso=concursos).sort_values("_ordem_concurso")
+dezenas_df = df.iloc[:, 2:8].reset_index(drop=True)
+try:
+    historico_de_jogos(dezenas_df.itertuples(index=False, name=None))
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+dezenas_df = dezenas_df.apply(pd.to_numeric).astype(int)
 
 # ================================================================
 # Funções auxiliares
@@ -245,36 +262,27 @@ def passa_filtros(comb, dezenas_df, min_pares, max_pares, soma_min, soma_max):
         recentes_ok(comb, dezenas_df)
     )
 
-def gerar_jogos(prob, dezenas_df, qtd_jogos, num_sim, filtros, evitar_repeticao=True):
-    resultados = {}
-    p_array = np.array([prob[int(n)] for n in TODAS_DEZENAS])
-    for _ in range(num_sim):
-        sorteio = np.random.choice(TODAS_DEZENAS, size=6, replace=False, p=p_array)
-        sorteio = tuple(sorted(int(x) for x in sorteio))
-        resultados[sorteio] = resultados.get(sorteio, 0) + 1
+def gerar_jogos(dezenas_df, qtd_jogos, num_sim, filtros, evitar_repeticao=False, universo=tuple(range(1, 61))):
+    return gerar_jogos_cobertura(dezenas_df.itertuples(index=False, name=None), qtd_jogos,
+                                 num_sim, filtros, evitar_repeticao, universo)
 
-    ordenado = sorted(resultados.items(), key=lambda x: x[1], reverse=True)
-    min_pares, max_pares, soma_min, soma_max = filtros
-    jogos, usadas = [], set()
 
-    for comb, _ in ordenado:
-        if len(jogos) >= qtd_jogos:
-            break
-        if not passa_filtros(comb, dezenas_df, min_pares, max_pares, soma_min, soma_max):
-            continue
-        if evitar_repeticao and any(n in usadas for n in comb):
-            continue
-        jogos.append(comb)
-        usadas.update(comb)
-    return jogos
+def exibir_cobertura(jogos, solicitados):
+    if len(jogos) < solicitados:
+        st.warning(f"Foram gerados {len(jogos)} de {solicitados} jogos. Aumente os candidatos ou relaxe os filtros.")
+    if jogos:
+        metricas = metricas_cobertura(jogos)
+        st.caption(f"Senas distintas: {metricas['senas']}; subconjuntos de quina distintos: {metricas['quinas_distintas']}; resultados de seis dezenas com quina exata: {metricas['resultados_quina_exata']}; com quina ou sena: {metricas['resultados_quina_ou_sena']} de {metricas['total_resultados']:,}.")
 
-def backtest(dezenas_df, pesos, num_sim, jogos_por_concurso, inicio, fim, filtros):
+
+def backtest(dezenas_df, num_sim, jogos_por_concurso, inicio, fim, filtros):
     resultados_bt = []
     for idx in range(inicio, fim):
         historico = dezenas_df.iloc[:idx]
         real = _linha_valida(dezenas_df.iloc[idx])
-        *_, prob = calcular_estatisticas(historico, pesos)
-        jogos = gerar_jogos(prob, historico, jogos_por_concurso, num_sim, filtros, evitar_repeticao=False)
+        jogos = gerar_jogos(historico, jogos_por_concurso, num_sim, filtros)
+        if len(jogos) < jogos_por_concurso:
+            st.warning(f"Concurso no índice {idx}: gerados {len(jogos)} de {jogos_por_concurso} jogos.")
         for jogo in jogos:
             acertos = len(real.intersection(set(jogo)))
             resultados_bt.append({"concurso": idx+1, "jogo": jogo, "acertos": acertos})
@@ -316,11 +324,7 @@ with tab_modelo:
     else:
         st.success(f"✅ Soma dos pesos: {soma_pesos:.2f}")
 
-    st.info(
-        "**🌀 Peso Teoria do Caos:** incorpora Expoente de Hurst, Lyapunov e Entropia de "
-        "Permutação por dezena. Dezenas em regime *Persistente* com baixa entropia recebem "
-        "ChaosScore mais alto, aumentando sua probabilidade de seleção."
-    )
+    st.info("Os pesos e indicadores são apenas descritivos. Eles não alteram a seleção dos jogos nem estimam a probabilidade dos próximos sorteios.")
 
 freq50, freq20, atraso, repeticoes, afinidade, caos, score, prob = calcular_estatisticas(dezenas_df, pesos)
 
@@ -361,7 +365,7 @@ with tab_caos:
 | **Lyapunov (λ)** | Sensibilidade às condições iniciais | λ>0 caótico · λ<0 estável |
 | **Entropia (E)** | Complexidade local | E→1 caótico · E→0 regular |
 | **Regime** | Classificação automática | Persistente / Anti-persistente / Estocástico / Caótico |
-| **Oportunidade** | Score de aproveitamento | Quanto maior, mais favorável para previsão |
+| **Oportunidade** | Indicador histórico | Descritivo; não prevê sorteios |
     """)
 
     caos_df = pd.DataFrame([
@@ -433,7 +437,7 @@ with tab_caos:
     st.pyplot(fig3)
 
     # Alerta de oportunidade
-    st.markdown("#### 🎯 Dezenas em Maior Oportunidade Agora")
+    st.markdown("#### 🎯 Maiores valores do indicador histórico")
     st.dataframe(
         caos_df.sort_values("Oportunidade", ascending=False).head(10)
                [["Dezena","Regime","Hurst (H)","Entropia (E)","Oportunidade","ChaosScore"]],
@@ -444,51 +448,49 @@ with tab_caos:
 # Aba: Jogos Otimizados
 # ----------------------------------------------------------------
 with tab_jogos:
-    st.subheader("🎲 Geração de Jogos Otimizados")
-    num_sim    = st.slider("Número de simulações Monte Carlo", 5000, 100000, 20000)
+    st.subheader("🎲 Geração de Jogos por Cobertura")
+    st.caption("São excluídos jogos do histórico e sequências de três ou mais dezenas consecutivas. Pares consecutivos são permitidos. Em empates de cobertura, preferem-se menos dezenas de 1 a 31 e menos múltiplos de 5: é uma heurística, não dados reais de popularidade.")
+    num_sim    = st.slider("Candidatos aleatórios avaliados", 5000, 100000, 20000)
     qtd_jogos  = st.number_input("Quantos jogos deseja gerar?", 1, 30, 10)
-    min_pares  = st.number_input("Mínimo de pares", 0, 6, 2)
-    max_pares  = st.number_input("Máximo de pares", 0, 6, 4)
-    soma_min   = st.number_input("Soma mínima", 60, 300, 120)
-    soma_max   = st.number_input("Soma máxima", 60, 300, 210)
-    evitar_rep = st.checkbox("Evitar repetir dezenas entre jogos", True)
+    min_pares  = st.number_input("Mínimo de pares", 0, 6, 0)
+    max_pares  = st.number_input("Máximo de pares", 0, 6, 6)
+    soma_min   = st.number_input("Soma mínima", 21, 345, 21)
+    soma_max   = st.number_input("Soma máxima", 21, 345, 345)
+    evitar_rep = st.checkbox("Evitar repetir dezenas entre jogos (limite de 10 jogos)", False)
     filtros    = (min_pares, max_pares, soma_min, soma_max)
 
     if st.button("Gerar jogos"):
-        jogos = gerar_jogos(prob, dezenas_df, qtd_jogos, num_sim, filtros, evitar_rep)
-        if not jogos:
-            st.warning("Nenhum jogo passou pelos filtros. Tente afrouxar os critérios.")
+        if min_pares > max_pares or soma_min > soma_max:
+            st.error("Os limites mínimos não podem superar os máximos.")
         else:
-            jogos_df = pd.DataFrame(jogos, columns=["D1","D2","D3","D4","D5","D6"])
-            jogos_df["🌀 ChaosScore Médio"] = [
-                round(np.mean([caos[n]["chaos_score"] for n in jogo]), 4) for jogo in jogos
-            ]
-            jogos_df["Regime Dominante"] = [
-                pd.Series([caos[n]["regime"] for n in jogo]).mode()[0] for jogo in jogos
-            ]
-            st.dataframe(jogos_df, use_container_width=True)
+            jogos = gerar_jogos(dezenas_df, qtd_jogos, num_sim, filtros, evitar_rep)
+            exibir_cobertura(jogos, qtd_jogos)
+            if jogos:
+                jogos_df = pd.DataFrame(jogos, columns=["D1","D2","D3","D4","D5","D6"])
+                st.dataframe(jogos_df, use_container_width=True)
 
-            fig4, ax4 = plt.subplots(figsize=(6, 3))
-            ax4.hist([sum(j) for j in jogos], bins=10, edgecolor="black", color="steelblue")
-            ax4.set_xlabel("Soma dos jogos")
-            ax4.set_ylabel("Frequência")
-            st.pyplot(fig4)
+                fig4, ax4 = plt.subplots(figsize=(6, 3))
+                ax4.hist([sum(j) for j in jogos], bins=10, edgecolor="black", color="steelblue")
+                ax4.set_xlabel("Soma dos jogos")
+                ax4.set_ylabel("Frequência")
+                st.pyplot(fig4)
 
-            from io import BytesIO
-            output = BytesIO()
-            writer = pd.ExcelWriter(output, engine="xlsxwriter")
-            jogos_df.to_excel(writer, index=False, sheet_name="Jogos")
-            writer.close()
-            st.download_button("📥 Baixar jogos em Excel", output.getvalue(),
-                               "jogos_mega_otimizados.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                from io import BytesIO
+                output = BytesIO()
+                writer = pd.ExcelWriter(output, engine="xlsxwriter")
+                jogos_df.to_excel(writer, index=False, sheet_name="Jogos")
+                writer.close()
+                st.download_button("📥 Baixar jogos em Excel", output.getvalue(),
+                                   "jogos_mega_otimizados.xlsx",
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ----------------------------------------------------------------
 # Aba: Pacotes de Perfis
 # ----------------------------------------------------------------
 with tab_pacotes:
     st.subheader("🎯 Pacotes de jogos por perfil")
-    num_sim_pac    = st.slider("Simulações (pacotes)", 5000, 50000, 15000)
+    st.caption("Cada perfil é otimizado separadamente; jogos podem se repetir entre perfis. Os filtros não indicam maior chance de sorteio.")
+    num_sim_pac    = st.slider("Candidatos (pacotes)", 5000, 50000, 15000)
     qtd_por_perfil = st.number_input("Jogos por perfil", 1, 20, 5)
     perfis = {
         "Conservador": (2, 4, 120, 200),
@@ -497,26 +499,25 @@ with tab_pacotes:
     }
     if st.button("Gerar pacotes"):
         for nome, filtros_p in perfis.items():
-            jogos = gerar_jogos(prob, dezenas_df, qtd_por_perfil, num_sim_pac, filtros_p, evitar_repeticao=True)
+            jogos = gerar_jogos(dezenas_df, qtd_por_perfil, num_sim_pac, filtros_p)
             st.markdown(f"**Perfil {nome}:**")
+            exibir_cobertura(jogos, qtd_por_perfil)
             if jogos:
                 dfp = pd.DataFrame(jogos, columns=["D1","D2","D3","D4","D5","D6"])
-                dfp["🌀 ChaosScore Médio"] = [
-                    round(np.mean([caos[n]["chaos_score"] for n in jogo]), 4) for jogo in jogos
-                ]
                 st.dataframe(dfp, use_container_width=True)
-            else:
-                st.warning(f"Nenhum jogo encontrado para o perfil {nome}.")
 
 # ----------------------------------------------------------------
 # Aba: Backtest & Métricas
 # ----------------------------------------------------------------
 with tab_backtest:
     st.subheader("📈 Backtest do modelo")
-    max_idx            = len(dezenas_df) - 1
-    inicio             = st.slider("Concurso inicial (índice)", 0, max_idx-10, max_idx-100)
-    fim                = st.slider("Concurso final (índice)",   inicio+10, max_idx, max_idx)
-    num_sim_bt         = st.slider("Simulações por concurso", 1000, 20000, 5000)
+    max_idx = len(dezenas_df) - 1
+    if max_idx < 1:
+        st.info("O backtest requer pelo menos dois concursos.")
+        st.stop()
+    inicio = st.number_input("Concurso inicial (índice, base zero)", 1, max_idx, max(1, max_idx - 99))
+    fim = st.number_input("Concurso final (índice inclusivo)", inicio, max_idx, max_idx)
+    num_sim_bt = st.slider("Candidatos por concurso", 1000, 20000, 5000)
     jogos_por_concurso = st.number_input("Jogos por concurso no backtest", 1, 20, 5)
     min_pares_bt       = st.number_input("Mínimo de pares (BT)", 0, 6, 2)
     max_pares_bt       = st.number_input("Máximo de pares (BT)", 0, 6, 4)
@@ -525,7 +526,10 @@ with tab_backtest:
     filtros_bt         = (min_pares_bt, max_pares_bt, soma_min_bt, soma_max_bt)
 
     if st.button("Rodar backtest"):
-        bt_df = backtest(dezenas_df, pesos, num_sim_bt, jogos_por_concurso, inicio, fim, filtros_bt)
+        if min_pares_bt > max_pares_bt or soma_min_bt > soma_max_bt:
+            st.error("Os limites mínimos não podem superar os máximos.")
+            st.stop()
+        bt_df = backtest(dezenas_df, num_sim_bt, jogos_por_concurso, inicio, fim + 1, filtros_bt)
         if bt_df.empty:
             st.warning("Nenhum resultado de backtest gerado.")
         else:
